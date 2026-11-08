@@ -1,5 +1,5 @@
--- ASTER SMARTHEAL, adapted to the current Bloodfruit packet.
--- X toggles it; SmartHeal arms at 65% HP and recovers to 98%.
+-- ASTER SMARTHEAL + GOD PLAYER ESP + reversible Performance Mode.
+-- The menu lets you toggle features and rebind the SmartHeal key.
 -- Assumption from the user: one Bloodfruit restores about 3.5 HP.
 
 do
@@ -29,7 +29,12 @@ do
     if type(previous) == "table" then
         if previous.connection then pcall(function() previous.connection:Disconnect() end) end
         if previous.clickConnection then pcall(function() previous.clickConnection:Disconnect() end) end
+        if previous.godClickConnection then pcall(function() previous.godClickConnection:Disconnect() end) end
+        if previous.performanceClickConnection then pcall(function() previous.performanceClickConnection:Disconnect() end) end
+        if previous.keybindClickConnection then pcall(function() previous.keybindClickConnection:Disconnect() end) end
         if previous.perfConnection then pcall(function() previous.perfConnection:Disconnect() end) end
+        if previous.godEspStop then pcall(previous.godEspStop) end
+        if previous.performanceStop then pcall(previous.performanceStop) end
         if previous.gui then pcall(function() previous.gui:Destroy() end) end
     end
 
@@ -60,24 +65,18 @@ do
     screenGui.DisplayOrder = 10000
     screenGui.Parent = playerGui
 
-    local status = Instance.new("TextButton")
-    status.Name = "Status"
-    status.AnchorPoint = Vector2.new(0.5, 0)
-    status.Position = UDim2.new(0.5, 0, 0, 14)
-    status.Size = UDim2.fromOffset(270, 58)
-    status.BackgroundColor3 = Color3.fromRGB(22, 25, 31)
-    status.BackgroundTransparency = 0.12
+    local status = Instance.new("Frame")
+    status.Name = "CompactMenu"
+    status.AnchorPoint = Vector2.new(1, 0)
+    status.Position = UDim2.new(1, -14, 0, 14)
+    status.Size = UDim2.fromOffset(300, 125)
+    status.BackgroundColor3 = Color3.fromRGB(18, 22, 30)
+    status.BackgroundTransparency = 0.08
     status.BorderSizePixel = 0
-    status.Font = Enum.Font.GothamBold
-    status.Text = "AUTOHEAL OFF  [X]\nPress X to enable"
-    status.AutoButtonColor = false
-    status.TextColor3 = Color3.fromRGB(255, 105, 105)
-    status.TextSize = 13
-    status.TextWrapped = true
     status.Parent = screenGui
 
     local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, 8)
+    corner.CornerRadius = UDim.new(0, 9)
     corner.Parent = status
 
     local outline = Instance.new("UIStroke")
@@ -86,7 +85,92 @@ do
     outline.Color = Color3.fromRGB(230, 80, 80)
     outline.Parent = status
 
+    local statusLabel = Instance.new("TextLabel")
+    statusLabel.Name = "StatusText"
+    statusLabel.Position = UDim2.new(0, 10, 0, 7)
+    statusLabel.Size = UDim2.new(1, -20, 0, 36)
+    statusLabel.BackgroundTransparency = 1
+    statusLabel.Font = Enum.Font.GothamSemibold
+    statusLabel.Text = "ASTER SMARTHEAL • OFF [X]\nREADY"
+    statusLabel.TextColor3 = Color3.fromRGB(225, 232, 242)
+    statusLabel.TextSize = 11
+    statusLabel.TextWrapped = true
+    statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+    statusLabel.TextYAlignment = Enum.TextYAlignment.Top
+    statusLabel.Parent = status
+
+    local healthTrack = Instance.new("Frame")
+    healthTrack.Name = "HealthTrack"
+    healthTrack.Position = UDim2.new(0, 10, 0, 46)
+    healthTrack.Size = UDim2.new(1, -20, 0, 4)
+    healthTrack.BackgroundColor3 = Color3.fromRGB(48, 56, 68)
+    healthTrack.BorderSizePixel = 0
+    healthTrack.Parent = status
+
+    local healthFill = Instance.new("Frame")
+    healthFill.Name = "HealthFill"
+    healthFill.Size = UDim2.new(1, 0, 1, 0)
+    healthFill.BackgroundColor3 = Color3.fromRGB(83, 205, 138)
+    healthFill.BorderSizePixel = 0
+    healthFill.Parent = healthTrack
+
+    local function addCorner(instance, radius)
+        local item = Instance.new("UICorner")
+        item.CornerRadius = UDim.new(0, radius)
+        item.Parent = instance
+    end
+    addCorner(healthTrack, 3)
+    addCorner(healthFill, 3)
+
+    local function makeMenuButton(name, text, x, y, width, height)
+        local button = Instance.new("TextButton")
+        button.Name = name
+        button.Position = UDim2.new(0, x, 0, y)
+        button.Size = UDim2.fromOffset(width, height)
+        button.BackgroundColor3 = Color3.fromRGB(35, 42, 54)
+        button.BorderSizePixel = 0
+        button.AutoButtonColor = false
+        button.Font = Enum.Font.GothamSemibold
+        button.Text = text
+        button.TextColor3 = Color3.fromRGB(210, 218, 230)
+        button.TextSize = 9
+        button.TextWrapped = true
+        button.Parent = status
+        addCorner(button, 5)
+        return button
+    end
+
+    local healToggleButton = makeMenuButton("HealToggle", "HEAL: OFF", 10, 58, 86, 25)
+    local godEspToggleButton = makeMenuButton("GodEspToggle", "GOD ESP: OFF", 107, 58, 86, 25)
+    local performanceToggleButton = makeMenuButton("PerformanceToggle", "POTATO: OFF", 204, 58, 86, 25)
+    local keybindButton = makeMenuButton("Keybind", "KEY: X", 10, 92, 82, 23)
+
+    local keybindHint = Instance.new("TextLabel")
+    keybindHint.Name = "KeybindHint"
+    keybindHint.Position = UDim2.new(0, 101, 0, 92)
+    keybindHint.Size = UDim2.new(1, -111, 0, 23)
+    keybindHint.BackgroundTransparency = 1
+    keybindHint.Font = Enum.Font.Gotham
+    keybindHint.Text = "Click KEY to rebind"
+    keybindHint.TextColor3 = Color3.fromRGB(145, 156, 173)
+    keybindHint.TextSize = 9
+    keybindHint.TextXAlignment = Enum.TextXAlignment.Left
+    keybindHint.Parent = status
+
     local enabled = false
+    local godEspEnabled = false
+    local godEspGeneration = 0
+    local godEspObjects = {}
+    local GOD_ARMOR_PIECES = {"God Halo", "God Chestplate", "God Legs"}
+    local performanceEnabled = false
+    local performanceOriginals = setmetatable({}, {__mode = "k"})
+    local performanceAddedConnections = {}
+    local waitingForKey = false
+    local initialHealKey
+    pcall(function()
+        initialHealKey = Enum.KeyCode[tostring(runtime.AutoHealKey or "X")]
+    end)
+    local healKeyCode = initialHealKey or Enum.KeyCode.X
     local lastHeal = 0
     local smartHealBursting = false
     local smartHealCycleStart = 0
@@ -508,19 +592,55 @@ do
     end
 
     local function show(text, isOn, isReady)
-        local fullText = (isOn and "AUTOHEAL ON  [X]\n" or "AUTOHEAL OFF  [X]\n") .. text
+        local fullText = (isOn and ("ASTER SMARTHEAL  •  ON  [" .. healKeyCode.Name .. "]\n")
+            or ("ASTER SMARTHEAL  •  OFF  [" .. healKeyCode.Name .. "]\n")) .. text
+        local humanoid = getHumanoid()
+        local healthPercent = 0
+        if humanoid and humanoid.MaxHealth > 0 then
+            healthPercent = math.clamp(humanoid.Health / humanoid.MaxHealth, 0, 1)
+        end
+        healthFill.Size = UDim2.new(healthPercent, 0, 1, 0)
+        if healthPercent <= 0.3 then
+            healthFill.BackgroundColor3 = Color3.fromRGB(238, 92, 92)
+        elseif healthPercent <= 0.6 then
+            healthFill.BackgroundColor3 = Color3.fromRGB(245, 181, 80)
+        else
+            healthFill.BackgroundColor3 = Color3.fromRGB(83, 205, 138)
+        end
+
+        healToggleButton.Text = isOn and "HEAL: ON" or "HEAL: OFF"
+        healToggleButton.BackgroundColor3 = isOn
+            and Color3.fromRGB(37, 75, 59)
+            or Color3.fromRGB(35, 42, 54)
+        godEspToggleButton.Text = godEspEnabled and "GOD ESP: ON" or "GOD ESP: OFF"
+        godEspToggleButton.BackgroundColor3 = godEspEnabled
+            and Color3.fromRGB(78, 68, 36)
+            or Color3.fromRGB(35, 42, 54)
+        performanceToggleButton.Text = performanceEnabled and "POTATO: ON" or "POTATO: OFF"
+        performanceToggleButton.BackgroundColor3 = performanceEnabled
+            and Color3.fromRGB(61, 55, 86)
+            or Color3.fromRGB(35, 42, 54)
+        keybindButton.Text = waitingForKey and "PRESS KEY" or ("KEY: " .. healKeyCode.Name)
+        keybindHint.Text = waitingForKey and "Press key • ESC cancels" or "Click KEY to rebind"
+
+        if waitingForKey then
+            statusLabel.Text = "SET HEAL KEYBIND\nPress a key • Esc cancels"
+            statusLabel.TextColor3 = Color3.fromRGB(247, 229, 191)
+            outline.Color = Color3.fromRGB(245, 181, 80)
+            return
+        end
         if fullText == lastDisplay then return end
         lastDisplay = fullText
-        status.Text = fullText
+        statusLabel.Text = fullText
         if not isOn then
-            status.TextColor3 = Color3.fromRGB(255, 105, 105)
-            outline.Color = Color3.fromRGB(230, 80, 80)
+            statusLabel.TextColor3 = Color3.fromRGB(205, 214, 226)
+            outline.Color = Color3.fromRGB(110, 125, 145)
         elseif isReady then
-            status.TextColor3 = Color3.fromRGB(112, 255, 145)
-            outline.Color = Color3.fromRGB(70, 220, 110)
+            statusLabel.TextColor3 = Color3.fromRGB(220, 242, 229)
+            outline.Color = Color3.fromRGB(83, 205, 138)
         else
-            status.TextColor3 = Color3.fromRGB(255, 195, 95)
-            outline.Color = Color3.fromRGB(230, 155, 50)
+            statusLabel.TextColor3 = Color3.fromRGB(247, 229, 191)
+            outline.Color = Color3.fromRGB(245, 181, 80)
         end
     end
 
@@ -664,6 +784,260 @@ do
         return false, period - elapsed
     end
 
+    local function isGodPlayerCharacter(character)
+        if not character then return false end
+        local humanoid = character:FindFirstChildOfClass("Humanoid")
+        if humanoid and humanoid.MaxHealth > 1000 then return true end
+        for _, pieceName in ipairs(GOD_ARMOR_PIECES) do
+            if character:FindFirstChild(pieceName) then return true end
+        end
+        return false
+    end
+
+    local function getGodArmorCount(character)
+        local count = 0
+        for _, pieceName in ipairs(GOD_ARMOR_PIECES) do
+            if character and character:FindFirstChild(pieceName) then
+                count = count + 1
+            end
+        end
+        return count
+    end
+
+    local function destroyGodPlayerEspEntry(data)
+        if not data then return end
+        if data.billboard then pcall(function() data.billboard:Destroy() end) end
+        if data.highlight then pcall(function() data.highlight:Destroy() end) end
+    end
+
+    local function clearGodEspObjects()
+        for target, data in pairs(godEspObjects) do
+            destroyGodPlayerEspEntry(data)
+            godEspObjects[target] = nil
+        end
+    end
+
+    local function stopGodEsp()
+        godEspEnabled = false
+        godEspGeneration = godEspGeneration + 1
+        clearGodEspObjects()
+        godEspToggleButton.Text = "GOD ESP: OFF"
+        godEspToggleButton.BackgroundColor3 = Color3.fromRGB(35, 42, 54)
+    end
+
+    local function makeGodPlayerEspEntry(target, character, rootPart, adornee, distance)
+        local color = Color3.fromRGB(255, 235, 85)
+        local highlight = Instance.new("Highlight")
+        highlight.Name = "GodPlayerESPHighlight"
+        highlight.Adornee = character
+        highlight.FillColor = color
+        highlight.OutlineColor = color
+        highlight.FillTransparency = 0.5
+        highlight.OutlineTransparency = 0
+        highlight.Parent = character
+
+        local billboard = Instance.new("BillboardGui")
+        billboard.Name = "GodPlayerESP"
+        billboard.Adornee = adornee
+        billboard.Size = UDim2.fromOffset(200, 36)
+        billboard.StudsOffset = Vector3.new(0, 5, 0)
+        billboard.AlwaysOnTop = true
+        billboard.LightInfluence = 0
+        billboard.MaxDistance = 0
+        billboard.Parent = character
+
+        local label = Instance.new("TextLabel")
+        label.Size = UDim2.fromScale(1, 1)
+        label.BackgroundTransparency = 1
+        label.Font = Enum.Font.GothamBold
+        label.TextColor3 = color
+        label.TextStrokeTransparency = 1
+        label.TextSize = 12
+        label.Text = string.format("%s GOD [%d] [%d/3]", target.Name, math.floor(distance), getGodArmorCount(character))
+        label.Parent = billboard
+
+        local textStroke = Instance.new("UIStroke")
+        textStroke.Thickness = 0.75
+        textStroke.Transparency = 0
+        textStroke.Color = Color3.new(0, 0, 0)
+        textStroke.Parent = label
+
+        return {
+            character = character,
+            rootPart = rootPart,
+            adornee = adornee,
+            highlight = highlight,
+            billboard = billboard,
+            label = label,
+        }
+    end
+
+    local function setGodEspEnabled(value)
+        value = value == true
+        if godEspEnabled == value then return end
+        godEspEnabled = value
+        godEspGeneration = godEspGeneration + 1
+        local generation = godEspGeneration
+        godEspToggleButton.Text = godEspEnabled and "GOD ESP: ON" or "GOD ESP: OFF"
+        godEspToggleButton.BackgroundColor3 = godEspEnabled
+            and Color3.fromRGB(78, 68, 36)
+            or Color3.fromRGB(35, 42, 54)
+
+        if not godEspEnabled then
+            clearGodEspObjects()
+            return
+        end
+
+        task.spawn(function()
+            while screenGui.Parent and godEspEnabled and generation == godEspGeneration do
+                local localRoot = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+                if localRoot then
+                    local currentPlayers = {}
+                    for _, target in ipairs(Players:GetPlayers()) do
+                        if target ~= player then
+                            local character = target.Character
+                            if character and character.Parent and isGodPlayerCharacter(character) then
+                                local rootPart = character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart
+                                local adornee = character:FindFirstChild("Head") or rootPart
+                                if rootPart and adornee then
+                                    currentPlayers[target] = true
+                                    local distance = (rootPart.Position - localRoot.Position).Magnitude
+                                    local data = godEspObjects[target]
+                                    if not data or data.character ~= character
+                                        or data.rootPart ~= rootPart or data.adornee ~= adornee
+                                        or not data.billboard.Parent or not data.highlight.Parent then
+                                        destroyGodPlayerEspEntry(data)
+                                        data = makeGodPlayerEspEntry(target, character, rootPart, adornee, distance)
+                                        godEspObjects[target] = data
+                                    end
+                                    data.label.Text = string.format(
+                                        "%s GOD [%d] [%d/3]",
+                                        target.Name,
+                                        math.floor(distance),
+                                        getGodArmorCount(character)
+                                    )
+                                end
+                            end
+                        end
+                    end
+
+                    for target, data in pairs(godEspObjects) do
+                        if not target.Parent or not currentPlayers[target] then
+                            destroyGodPlayerEspEntry(data)
+                            godEspObjects[target] = nil
+                        end
+                    end
+                end
+                task.wait(0.1)
+            end
+            if generation == godEspGeneration then clearGodEspObjects() end
+        end)
+    end
+
+    local function saveAndSet(instance, property, value)
+        local saved = performanceOriginals[instance]
+        if not saved then
+            saved = {}
+            performanceOriginals[instance] = saved
+        end
+        if saved[property] == nil then
+            local ok, original = pcall(function() return instance[property] end)
+            if ok then saved[property] = original end
+        end
+        pcall(function() instance[property] = value end)
+    end
+
+    local function applyPerformanceToInstance(instance)
+        if not performanceEnabled then return end
+        if instance:IsA("BasePart") then
+            saveAndSet(instance, "CastShadow", false)
+            saveAndSet(instance, "Material", Enum.Material.SmoothPlastic)
+            saveAndSet(instance, "Reflectance", 0)
+        elseif instance:IsA("Decal") or instance:IsA("Texture") then
+            saveAndSet(instance, "Transparency", 1)
+        elseif instance:IsA("ParticleEmitter") or instance:IsA("Trail")
+            or instance:IsA("Beam") or instance:IsA("Fire")
+            or instance:IsA("Smoke") or instance:IsA("Sparkles") then
+            saveAndSet(instance, "Enabled", false)
+        elseif instance:IsA("PostEffect") then
+            saveAndSet(instance, "Enabled", false)
+        elseif instance:IsA("Clouds") then
+            saveAndSet(instance, "Enabled", false)
+        elseif instance:IsA("Atmosphere") then
+            saveAndSet(instance, "Density", 0)
+            saveAndSet(instance, "Haze", 0)
+            saveAndSet(instance, "Glare", 0)
+        elseif instance:IsA("SurfaceAppearance") then
+            saveAndSet(instance, "ColorMap", "")
+            saveAndSet(instance, "NormalMap", "")
+            saveAndSet(instance, "MetalnessMap", "")
+            saveAndSet(instance, "RoughnessMap", "")
+        end
+    end
+
+    local function restorePerformanceMode()
+        for _, addedConnection in ipairs(performanceAddedConnections) do
+            pcall(function() addedConnection:Disconnect() end)
+        end
+        table.clear(performanceAddedConnections)
+        for instance, properties in pairs(performanceOriginals) do
+            for property, original in pairs(properties) do
+                pcall(function() instance[property] = original end)
+            end
+            performanceOriginals[instance] = nil
+        end
+    end
+
+    local function stopPerformanceMode()
+        performanceEnabled = false
+        restorePerformanceMode()
+        performanceToggleButton.Text = "POTATO: OFF"
+        performanceToggleButton.BackgroundColor3 = Color3.fromRGB(35, 42, 54)
+    end
+
+    local function setPerformanceMode(value)
+        value = value == true
+        if performanceEnabled == value then return end
+        performanceEnabled = value
+        performanceToggleButton.Text = performanceEnabled and "POTATO: ON" or "POTATO: OFF"
+        performanceToggleButton.BackgroundColor3 = performanceEnabled
+            and Color3.fromRGB(61, 55, 86)
+            or Color3.fromRGB(35, 42, 54)
+
+        if not performanceEnabled then
+            restorePerformanceMode()
+            return
+        end
+
+        local lighting = game:GetService("Lighting")
+        saveAndSet(lighting, "GlobalShadows", false)
+        saveAndSet(lighting, "EnvironmentDiffuseScale", 0)
+        saveAndSet(lighting, "EnvironmentSpecularScale", 0)
+        saveAndSet(lighting, "FogEnd", 1000000000)
+
+        local terrain = workspace:FindFirstChildOfClass("Terrain")
+        if terrain then
+            saveAndSet(terrain, "Decoration", false)
+            saveAndSet(terrain, "WaterWaveSize", 0)
+            saveAndSet(terrain, "WaterWaveSpeed", 0)
+            saveAndSet(terrain, "WaterReflectance", 0)
+            saveAndSet(terrain, "WaterTransparency", 0.75)
+        end
+
+        for _, instance in ipairs(workspace:GetDescendants()) do
+            applyPerformanceToInstance(instance)
+        end
+        for _, instance in ipairs(lighting:GetDescendants()) do
+            applyPerformanceToInstance(instance)
+        end
+        performanceAddedConnections[#performanceAddedConnections + 1] = workspace.DescendantAdded:Connect(function(instance)
+            if performanceEnabled then applyPerformanceToInstance(instance) end
+        end)
+        performanceAddedConnections[#performanceAddedConnections + 1] = lighting.DescendantAdded:Connect(function(instance)
+            if performanceEnabled then applyPerformanceToInstance(instance) end
+        end)
+    end
+
     local function toggleAutoHeal()
         enabled = not enabled
         lastHeal = 0
@@ -685,26 +1059,68 @@ do
         end
     end
 
+    local function beginKeybindCapture()
+        waitingForKey = true
+        lastDisplay = nil
+        keybindButton.Text = "PRESS KEY"
+        keybindHint.Text = "Press key • ESC cancels"
+        statusLabel.Text = "SET HEAL KEYBIND\nPress a key • Esc cancels"
+        statusLabel.TextColor3 = Color3.fromRGB(247, 229, 191)
+        outline.Color = Color3.fromRGB(245, 181, 80)
+    end
+
+    local healButtonConnection = healToggleButton.Activated:Connect(toggleAutoHeal)
+    local godClickConnection = godEspToggleButton.Activated:Connect(function()
+        setGodEspEnabled(not godEspEnabled)
+    end)
+    local performanceClickConnection = performanceToggleButton.Activated:Connect(function()
+        setPerformanceMode(not performanceEnabled)
+    end)
+    local keybindClickConnection = keybindButton.Activated:Connect(beginKeybindCapture)
+
     local connection = UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+
+        if waitingForKey then
+            if input.KeyCode == Enum.KeyCode.Escape then
+                waitingForKey = false
+                lastDisplay = nil
+                return
+            end
+            if input.KeyCode ~= Enum.KeyCode.Unknown then
+                healKeyCode = input.KeyCode
+                runtime.AutoHealKey = healKeyCode.Name
+                waitingForKey = false
+                lastDisplay = nil
+                keybindButton.Text = "KEY: " .. healKeyCode.Name
+                keybindHint.Text = "Click KEY to rebind"
+            end
+            return
+        end
+
         if gameProcessed then return end
-        if input.UserInputType == Enum.UserInputType.Keyboard
-            and input.KeyCode == Enum.KeyCode.X then
+        if input.KeyCode == healKeyCode then
             toggleAutoHeal()
+            lastDisplay = nil
         end
     end)
-    local clickConnection = status.Activated:Connect(toggleAutoHeal)
 
     runtime.__StandaloneAutoHeal = {
         connection = connection,
-        clickConnection = clickConnection,
+        clickConnection = healButtonConnection,
+        godClickConnection = godClickConnection,
+        performanceClickConnection = performanceClickConnection,
+        keybindClickConnection = keybindClickConnection,
         perfConnection = healPerfConnection,
+        godEspStop = stopGodEsp,
+        performanceStop = stopPerformanceMode,
         gui = screenGui,
     }
 
     task.spawn(function()
         while screenGui.Parent do
             if not enabled then
-                show("SMARTHEAL OFF • PRESS X", false, false)
+                show("SMARTHEAL OFF • PRESS " .. healKeyCode.Name, false, false)
                 task.wait(0.12)
             else
                 local now = os.clock()
@@ -748,8 +1164,8 @@ do
                         show(hint, true, true)
                         task.wait(0.08)
                     elseif not smartHealBursting and hpPercent > SMARTHEAL_TRIGGER_PERCENT then
-                        show(("HP %.0f/%.0f • SMARTHEAL ARMED AT 65%%"):format(
-                            health, humanoid.MaxHealth
+                        show(("HP %.0f/%.0f • SMARTHEAL ARMED AT %d%%"):format(
+                            health, humanoid.MaxHealth, SMARTHEAL_TRIGGER_PERCENT
                         ), true, false)
                         task.wait(0.08)
                     else
