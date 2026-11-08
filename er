@@ -1,0 +1,821 @@
+-- ASTER SMARTHEAL, adapted to the current Bloodfruit packet.
+-- X toggles it; SmartHeal arms at 65% HP and recovers to 98%.
+-- Assumption from the user: one Bloodfruit restores about 3.5 HP.
+
+do
+    local Players = game:GetService("Players")
+    local ReplicatedStorage = game:GetService("ReplicatedStorage")
+    local UserInputService = game:GetService("UserInputService")
+    local HttpService = game:GetService("HttpService")
+    local StatsService = game:GetService("Stats")
+    local RunService = game:GetService("RunService")
+    local player = Players.LocalPlayer
+    if not player then
+        warn("[AutoHeal] LocalPlayer is unavailable")
+        return
+    end
+
+    local playerGui = player:FindFirstChildOfClass("PlayerGui")
+        or player:WaitForChild("PlayerGui")
+
+    local runtime = _G
+    if type(getgenv) == "function" then
+        local ok, env = pcall(getgenv)
+        if ok and type(env) == "table" then runtime = env end
+    end
+    if type(runtime) ~= "table" then runtime = {} end
+
+    local previous = runtime.__StandaloneAutoHeal
+    if type(previous) == "table" then
+        if previous.connection then pcall(function() previous.connection:Disconnect() end) end
+        if previous.clickConnection then pcall(function() previous.clickConnection:Disconnect() end) end
+        if previous.perfConnection then pcall(function() previous.perfConnection:Disconnect() end) end
+        if previous.gui then pcall(function() previous.gui:Destroy() end) end
+    end
+
+    local FRUIT_NAME = "Bloodfruit"
+    local HEAL_PER_FRUIT = 3.5
+    local SMARTHEAL_TRIGGER_PERCENT = 62
+    local SMARTHEAL_RECOVER_PERCENT = 98
+    local SMARTHEAL_CPS = 140
+    local SMARTHEAL_ACTIVE_SEC = 7
+    local SMARTHEAL_PAUSE_SEC = 0.30
+    local TARGET_PERCENT = SMARTHEAL_RECOVER_PERCENT
+    -- Mirrors Aster: CPS setting is 1-500, with SmartHeal using at least 140.
+    local function getHealCPS()
+        local requested = tonumber(runtime.AutoHealCPS) or 80
+        local configured = math.clamp(math.floor(requested), 1, 500)
+        return math.max(SMARTHEAL_CPS, configured)
+    end
+    local function getHealInterval(cps, adaptiveDelay)
+        return math.max((1 / cps) + math.min(adaptiveDelay or 0, 0.08), 0.008)
+    end
+    -- Confirmed from the user's working capture: {0, 52, slot}, nil.
+    local USE_BAG_SLOT_PACKET_ID = 52
+
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "StandaloneAutoHealStatus"
+    screenGui.ResetOnSpawn = false
+    screenGui.IgnoreGuiInset = true
+    screenGui.DisplayOrder = 10000
+    screenGui.Parent = playerGui
+
+    local status = Instance.new("TextButton")
+    status.Name = "Status"
+    status.AnchorPoint = Vector2.new(0.5, 0)
+    status.Position = UDim2.new(0.5, 0, 0, 14)
+    status.Size = UDim2.fromOffset(270, 58)
+    status.BackgroundColor3 = Color3.fromRGB(22, 25, 31)
+    status.BackgroundTransparency = 0.12
+    status.BorderSizePixel = 0
+    status.Font = Enum.Font.GothamBold
+    status.Text = "AUTOHEAL OFF  [X]\nPress X to enable"
+    status.AutoButtonColor = false
+    status.TextColor3 = Color3.fromRGB(255, 105, 105)
+    status.TextSize = 13
+    status.TextWrapped = true
+    status.Parent = screenGui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = status
+
+    local outline = Instance.new("UIStroke")
+    outline.Thickness = 1
+    outline.Transparency = 0.2
+    outline.Color = Color3.fromRGB(230, 80, 80)
+    outline.Parent = status
+
+    local enabled = false
+    local lastHeal = 0
+    local smartHealBursting = false
+    local smartHealCycleStart = 0
+    local healSmoothFps = 60
+    local healSmoothPingMs = 80
+    local healLastPingSample = 0
+    local healLagPauseUntil = 0
+    local healPerfConnection = nil
+    local healLastDamageTime = 0
+    local healLastObservedHealth = nil
+    local healNoGainStreak = 0
+    local healAdaptiveDelay = 0
+    local healPendingHealthCheck = nil
+    local healPendingHealthAt = 0
+    local remoteEvent = nil
+    local itemIds = nil
+    local itemModuleObject = nil
+    local itemIdStatus = "WAITING FOR ITEMIDS MODULE"
+    local lastItemModuleScan = 0
+    local packets = nil
+    local packetIdTable = nil
+    local cachedFruitId = nil
+    local cachedUseBagItemId = nil
+    local lastDisplay = nil
+
+    local function findRemote()
+        local direct = ReplicatedStorage:FindFirstChild("ByteNetReliable")
+        if direct and direct:IsA("RemoteEvent") then return direct end
+        for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
+            if obj.Name == "ByteNetReliable" and obj:IsA("RemoteEvent") then
+                return obj
+            end
+        end
+        return nil
+    end
+
+    local function loadGameTables()
+        local modules = ReplicatedStorage:FindFirstChild("Modules")
+        if not itemModuleObject and os.clock() - lastItemModuleScan >= 2 then
+            lastItemModuleScan = os.clock()
+            local wantedNames = {
+                itemids = true,
+                itemid = true,
+                itemidmap = true,
+                itemidtable = true,
+            }
+            local function matchesItemIdModule(instance)
+                local normalized = instance.Name:lower():gsub("[^%w]", "")
+                return wantedNames[normalized] == true
+            end
+            if modules then
+                for _, child in ipairs(modules:GetChildren()) do
+                    if matchesItemIdModule(child) then
+                        itemModuleObject = child
+                        break
+                    end
+                end
+            end
+            if not itemModuleObject then
+                for _, descendant in ipairs(ReplicatedStorage:GetDescendants()) do
+                    if matchesItemIdModule(descendant) then
+                        itemModuleObject = descendant
+                        break
+                    end
+                end
+            end
+        end
+
+        if itemModuleObject and not itemIds and itemModuleObject:IsA("ModuleScript") then
+            local ok, result = pcall(require, itemModuleObject)
+            if ok and type(result) == "table" then
+                itemIds = result
+                itemIdStatus = "ITEMIDS LOADED; BLOODFRUIT ENTRY MISSING"
+            elseif not ok then
+                itemIdStatus = "ITEMIDS MODULE COULD NOT LOAD"
+            end
+        elseif not itemModuleObject then
+            itemIdStatus = "ITEMIDS MODULE NOT FOUND"
+        elseif not itemIds then
+            itemIdStatus = "ITEMIDS CONTAINER FOUND; LOOKING FOR BLOODFRUIT"
+        end
+
+        if not modules then return end
+
+        local packetsModule = modules:FindFirstChild("Packets")
+        if packetsModule and not packets then
+            local ok, result = pcall(require, packetsModule)
+            if ok and type(result) == "table" then packets = result end
+        end
+
+        if not packetIdTable then
+            local candidates = {}
+            local function addCandidate(candidate)
+                if candidate then candidates[#candidates + 1] = candidate end
+            end
+            local byteNet = modules:FindFirstChild("ByteNet")
+            local packetFolder = byteNet and byteNet:FindFirstChild("packets")
+            if packetFolder then
+                addCandidate(packetFolder:FindFirstChild("packetIDs"))
+                addCandidate(packetFolder:FindFirstChild("packetIds"))
+                addCandidate(packetFolder:FindFirstChild("PacketIDs"))
+            end
+            if byteNet then
+                addCandidate(byteNet:FindFirstChild("packetIDs"))
+                addCandidate(byteNet:FindFirstChild("packetIds"))
+            end
+            addCandidate(modules:FindFirstChild("packetIDs"))
+            addCandidate(modules:FindFirstChild("packetIds"))
+            for _, descendant in ipairs(modules:GetDescendants()) do
+                local lowerName = descendant.Name:lower()
+                if descendant:IsA("ModuleScript")
+                    and lowerName:find("packet", 1, true)
+                    and lowerName:find("id", 1, true) then
+                    addCandidate(descendant)
+                end
+            end
+            for _, candidate in ipairs(candidates) do
+                if candidate then
+                    local ok, result = pcall(require, candidate)
+                    if ok and type(result) == "table" then
+                        packetIdTable = result
+                        break
+                    end
+                end
+            end
+        end
+    end
+
+    local function xorString(value, key)
+        if type(value) ~= "string" or type(bit32) ~= "table" then return nil end
+        local output = table.create(#value)
+        for i = 1, #value do
+            local keyByte = string.byte(key, ((i - 1) % #key) + 1)
+            output[i] = string.char(bit32.bxor(string.byte(value, i), keyByte))
+        end
+        return table.concat(output)
+    end
+
+    local function readCachedPacketId(packetName)
+        if type(readfile) ~= "function" then return nil end
+        local paths = {
+            "ASTER/sys/c7/f2a91b.dat",
+            "ASTER/Booga/packet_ids.json",
+        }
+        for _, path in ipairs(paths) do
+            local ok, raw = pcall(readfile, path)
+            if ok and type(raw) == "string" and raw ~= "" then
+                local json = raw
+                if raw:sub(1, 4) == "AX1:" then
+                    local decodedOk, decoded = pcall(function()
+                        return HttpService:Base64Decode(raw:sub(5))
+                    end)
+                    if decodedOk then
+                        json = xorString(decoded, "A$t3rPk7_v2") or ""
+                    else
+                        json = ""
+                    end
+                elseif raw:sub(1, 4) == "AX0:" then
+                    json = xorString(raw:sub(5), "A$t3rPk7_v2") or ""
+                elseif raw:sub(1, 1) ~= "{" then
+                    json = ""
+                end
+
+                if json ~= "" then
+                    local decodedOk, decoded = pcall(function()
+                        return HttpService:JSONDecode(json)
+                    end)
+                    if decodedOk and type(decoded) == "table" then
+                        local packetMap = type(decoded.packets) == "table"
+                            and decoded.packets or decoded
+                        local id = tonumber(packetMap[packetName])
+                        if id and id > 0 then return id end
+                    end
+                end
+            end
+        end
+        return nil
+    end
+
+    local function findPacketId(packetName)
+        if type(getPacketId) == "function" then
+            local ok, id = pcall(getPacketId, packetName)
+            if ok and tonumber(id) then return tonumber(id) end
+        end
+        if type(PACKET_IDS) == "table" then
+            local sharedId = tonumber(PACKET_IDS[packetName])
+            if sharedId and sharedId > 0 then return sharedId end
+        end
+        loadGameTables()
+        local packet = packets and packets[packetName]
+        if type(packet) == "table" then
+            for _, key in ipairs({"id", "Id", "_id", "packetId", "packetID", "ID"}) do
+                local id = tonumber(packet[key])
+                if id and id > 0 then return id end
+            end
+        end
+        if type(packetIdTable) == "table" and packet then
+            for id, registeredPacket in pairs(packetIdTable) do
+                if registeredPacket == packet and tonumber(id) then
+                    return tonumber(id)
+                end
+            end
+        end
+        return readCachedPacketId(packetName)
+    end
+
+    local getInventoryList
+
+    local function normalizeName(value)
+        return tostring(value or ""):lower():gsub("[^%w]", "")
+    end
+
+    local function idFromValue(value)
+        if typeof(value) == "Instance" and value:IsA("ValueBase") then
+            value = value.Value
+        end
+        if type(value) == "table" then
+            for _, key in ipairs({"id", "Id", "ID", "itemId", "ItemID", "itemID", "value", "Value"}) do
+                local id = tonumber(value[key])
+                if id and id > 0 then return id end
+            end
+            return nil
+        end
+        local id = tonumber(value)
+        return id and id > 0 and id or nil
+    end
+
+    local function idFromInstance(instance)
+        for _, key in ipairs({"ItemID", "itemID", "ItemId", "itemId", "ID", "Id"}) do
+            local id = idFromValue(instance:GetAttribute(key))
+            if id then return id end
+        end
+        for _, child in ipairs(instance:GetDescendants()) do
+            if child:IsA("ValueBase") then
+                local childName = normalizeName(child.Name)
+                if childName == "itemid" or childName == "id" or childName == "item" then
+                    local id = idFromValue(child.Value)
+                    if id then return id end
+                end
+            end
+        end
+        return nil
+    end
+
+    local lastCraftItemIdScan = 0
+    local function findFruitIdFromCraftMenu()
+        if os.clock() - lastCraftItemIdScan < 1 then return nil end
+        lastCraftItemIdScan = os.clock()
+
+        local mainGui = playerGui:FindFirstChild("MainGui")
+        if not mainGui then return nil end
+        local leftPanel = mainGui:FindFirstChild("LeftPanel")
+        local menus = {}
+        local function addMenu(menu)
+            if menu then menus[#menus + 1] = menu end
+        end
+        addMenu(mainGui:FindFirstChild("CraftingMenu"))
+        addMenu(mainGui:FindFirstChild("Crafting"))
+        addMenu(mainGui:FindFirstChild("Craft"))
+        addMenu(leftPanel and leftPanel:FindFirstChild("Crafting"))
+        for _, menu in ipairs(menus) do
+            if menu then
+                for _, object in ipairs(menu:GetDescendants()) do
+                    local matches = false
+                    if object:IsA("TextLabel") or object:IsA("TextButton") then
+                        matches = normalizeName(object.Text) == normalizeName(FRUIT_NAME)
+                            or normalizeName(object.Name) == normalizeName(FRUIT_NAME)
+                    end
+                    if matches then
+                        local id = idFromInstance(object)
+                        if not id and object.Parent then id = idFromInstance(object.Parent) end
+                        if id then return id end
+                    end
+                end
+            end
+        end
+        return nil
+    end
+
+    local function findFruitId()
+        loadGameTables()
+        if cachedFruitId then return cachedFruitId end
+
+        -- Reuse the original source's live resolver when it is present in the
+        -- same game session, then fall back to its populated name-to-ID map.
+        if type(autoDiscoverItemID) == "function" then
+            local ok, value = pcall(autoDiscoverItemID, FRUIT_NAME)
+            if ok then cachedFruitId = idFromValue(value) end
+        end
+        if not cachedFruitId and type(craftNameToID) == "table" then
+            cachedFruitId = idFromValue(craftNameToID[FRUIT_NAME])
+        end
+
+        if type(itemIds) == "table" then
+            local direct = itemIds[FRUIT_NAME]
+            cachedFruitId = cachedFruitId or idFromValue(direct)
+            if not cachedFruitId then
+                for id, name in pairs(itemIds) do
+                    if normalizeName(name) == normalizeName(FRUIT_NAME) then
+                        cachedFruitId = idFromValue(id)
+                        break
+                    end
+                end
+            end
+        end
+        if not cachedFruitId then
+            local candidates = {}
+            if itemModuleObject then
+                local direct = itemModuleObject:FindFirstChild(FRUIT_NAME)
+                if direct then candidates[#candidates + 1] = direct end
+                for _, child in ipairs(itemModuleObject:GetDescendants()) do
+                    if normalizeName(child.Name) == normalizeName(FRUIT_NAME) then
+                        candidates[#candidates + 1] = child
+                    end
+                end
+            end
+            for _, candidate in ipairs(candidates) do
+                cachedFruitId = idFromValue(candidate)
+                    or idFromInstance(candidate)
+                if cachedFruitId then break end
+            end
+        end
+
+        -- Match the source's last-resort lookup: read the ID attached to the
+        -- Bloodfruit inventory icon when ItemIDS does not expose a name map.
+        if not cachedFruitId then
+            local list = getInventoryList()
+            if list then
+                for _, item in ipairs(list:GetChildren()) do
+                    if item:IsA("GuiObject")
+                        and normalizeName(item.Name) == normalizeName(FRUIT_NAME) then
+                        cachedFruitId = idFromInstance(item)
+                        if not cachedFruitId then
+                            for _, child in ipairs(item:GetChildren()) do
+                                if child:IsA("IntValue") or child:IsA("NumberValue") then
+                                    cachedFruitId = idFromValue(child.Value)
+                                    if cachedFruitId then break end
+                                end
+                            end
+                        end
+                        if cachedFruitId then break end
+                    end
+                end
+            end
+        end
+        if not cachedFruitId then
+            cachedFruitId = findFruitIdFromCraftMenu()
+        end
+        if cachedFruitId then
+            itemIdStatus = "BLOODFRUIT ID FOUND"
+            return cachedFruitId
+        end
+        return nil, itemIdStatus
+    end
+
+    getInventoryList = function()
+        local mainGui = playerGui:FindFirstChild("MainGui")
+        local right = mainGui and mainGui:FindFirstChild("RightPanel")
+        local inventory = right and right:FindFirstChild("Inventory")
+        return inventory and inventory:FindFirstChild("List")
+    end
+
+    local function findFruitSlot()
+        local list = getInventoryList()
+        if not list then return nil, false end
+        for _, child in ipairs(list:GetChildren()) do
+            if child:IsA("GuiObject")
+                and child.Name:lower():match("^%s*(.-)%s*$") == FRUIT_NAME:lower() then
+                return tonumber(child.LayoutOrder), true
+            end
+        end
+        return nil, true
+    end
+
+    local function sendOneFruit()
+        remoteEvent = remoteEvent or findRemote()
+        if not remoteEvent then return false, "WAITING FOR GAME REMOTE" end
+
+        local slotId, inventoryReady = findFruitSlot()
+        if not inventoryReady then return false, "WAITING FOR INVENTORY" end
+        if not slotId then return false, "ADD BLOODFRUIT TO INVENTORY" end
+
+        slotId = tonumber(slotId)
+        if not slotId or slotId < 0 or slotId > 255 then
+            return false, "INVALID BLOODFRUIT SLOT"
+        end
+
+        local ok = pcall(function()
+            local packet = buffer.create(3)
+            buffer.writeu8(packet, 0, 0)
+            buffer.writeu8(packet, 1, USE_BAG_SLOT_PACKET_ID)
+            buffer.writeu8(packet, 2, slotId)
+            remoteEvent:FireServer(packet, nil)
+        end)
+        if not ok then return false, "USE ITEM SEND FAILED" end
+        return true, "USING BLOODFRUIT"
+    end
+
+    local function getHumanoid()
+        local character = player.Character
+        return character and character:FindFirstChildOfClass("Humanoid")
+    end
+
+    local function getHealthState()
+        local humanoid = getHumanoid()
+        if not humanoid then return "WAITING FOR CHARACTER", false end
+        if humanoid.Health <= 0 then return "WAITING FOR RESPAWN", false end
+        if humanoid.MaxHealth <= 0 then return "WAITING FOR HEALTH", false end
+
+        local targetHealth = humanoid.MaxHealth * TARGET_PERCENT / 100
+        if humanoid.Health >= targetHealth - 0.05 then
+            return ("SMARTHEAL RECOVERED (%.0f/%.0f)"):format(humanoid.Health, humanoid.MaxHealth), false
+        end
+        local missing = targetHealth - humanoid.Health
+        local count = math.ceil(missing / HEAL_PER_FRUIT)
+        return ("HP %.0f/%.0f • NEED ~%d BLOODFRUIT"):format(
+            humanoid.Health, humanoid.MaxHealth, count
+        ), true
+    end
+
+    local function show(text, isOn, isReady)
+        local fullText = (isOn and "AUTOHEAL ON  [X]\n" or "AUTOHEAL OFF  [X]\n") .. text
+        if fullText == lastDisplay then return end
+        lastDisplay = fullText
+        status.Text = fullText
+        if not isOn then
+            status.TextColor3 = Color3.fromRGB(255, 105, 105)
+            outline.Color = Color3.fromRGB(230, 80, 80)
+        elseif isReady then
+            status.TextColor3 = Color3.fromRGB(112, 255, 145)
+            outline.Color = Color3.fromRGB(70, 220, 110)
+        else
+            status.TextColor3 = Color3.fromRGB(255, 195, 95)
+            outline.Color = Color3.fromRGB(230, 155, 50)
+        end
+    end
+
+    local function readServerPingMs()
+        local pingMs
+        pcall(function()
+            local network = StatsService:FindFirstChild("Network")
+            local serverStats = network and network:FindFirstChild("ServerStatsItem")
+            local dataPing = serverStats and serverStats:FindFirstChild("Data Ping")
+            if dataPing and dataPing.GetValue then
+                pingMs = tonumber(dataPing:GetValue())
+            end
+        end)
+        if not pingMs then
+            pcall(function()
+                if player.GetNetworkPing then
+                    pingMs = player:GetNetworkPing() * 1000
+                end
+            end)
+        end
+        return math.clamp(tonumber(pingMs) or healSmoothPingMs or 80, 1, 2000)
+    end
+
+    local function stopHealPerfSampler()
+        if healPerfConnection then
+            pcall(function() healPerfConnection:Disconnect() end)
+            healPerfConnection = nil
+        end
+    end
+
+    local function startHealPerfSampler()
+        if healPerfConnection then return end
+        healSmoothFps = 60
+        healSmoothPingMs = readServerPingMs()
+        healLastPingSample = 0
+        healPerfConnection = RunService.Heartbeat:Connect(function(dt)
+            if not enabled then return end
+            if type(dt) == "number" and dt > 0 and dt < 2 then
+                local instantFps = 1 / math.max(dt, 0.001)
+                local alpha = (dt >= 0.1) and 0.45 or 0.15
+                healSmoothFps = healSmoothFps * (1 - alpha) + instantFps * alpha
+                if dt >= 0.55 then
+                    local now = os.clock()
+                    healLagPauseUntil = math.max(
+                        healLagPauseUntil,
+                        now + math.clamp(dt * 0.25, 0.08, 0.22)
+                    )
+                end
+            end
+            local now = os.clock()
+            if now - healLastPingSample >= 0.25 then
+                healLastPingSample = now
+                healSmoothPingMs = healSmoothPingMs * 0.7 + readServerPingMs() * 0.3
+            end
+        end)
+        if type(runtime.__StandaloneAutoHeal) == "table" then
+            runtime.__StandaloneAutoHeal.perfConnection = healPerfConnection
+        end
+    end
+
+    local function getPingFpsHealScale(hpPercent, recentlyDamaged)
+        local fps = healSmoothFps
+        local ping = healSmoothPingMs
+        local critical = (hpPercent or 100) <= 45
+        local underPressure = critical or recentlyDamaged or (enabled and smartHealBursting)
+
+        local fpsScale
+        if fps < 8 then
+            fpsScale = underPressure and 0.55 or 0.4
+        elseif fps < 15 then
+            fpsScale = underPressure and 0.7 or (0.55 + (fps - 8) / 7 * 0.2)
+        elseif fps < 25 then
+            fpsScale = 0.75 + (fps - 15) / 10 * 0.15
+        elseif fps < 40 then
+            fpsScale = 0.9 + (fps - 25) / 15 * 0.08
+        else
+            fpsScale = 1
+        end
+
+        local pingScale
+        if ping <= 90 then
+            pingScale = 1
+        elseif ping <= 140 then
+            pingScale = 1 - (ping - 90) / 50 * 0.12
+        elseif ping <= 200 then
+            pingScale = 0.88 - (ping - 140) / 60 * 0.15
+        elseif ping <= 300 then
+            pingScale = 0.73 - (ping - 200) / 100 * 0.15
+        elseif ping <= 450 then
+            pingScale = 0.58 - (ping - 300) / 150 * 0.13
+        else
+            pingScale = underPressure and 0.45 or 0.35
+        end
+
+        local floor = underPressure and 0.45 or 0.32
+        return math.clamp(math.min(fpsScale, pingScale), floor, 1)
+    end
+
+    local function getEffectiveHealCPS(hpPercent, recentlyDamaged)
+        local now = os.clock()
+        local lagPaused = now < healLagPauseUntil
+        local scale = getPingFpsHealScale(hpPercent, recentlyDamaged)
+        local base = getHealCPS()
+
+        local gainScale = 1
+        if not recentlyDamaged then
+            if healNoGainStreak >= 8 then
+                gainScale = 0.45
+            elseif healNoGainStreak >= 5 then
+                gainScale = 0.65
+            elseif healNoGainStreak >= 3 then
+                gainScale = 0.85
+            end
+        end
+
+        local cps = base * scale * gainScale
+        if lagPaused and not recentlyDamaged and hpPercent > 45 then
+            cps = math.min(cps, math.max(14, base * 0.35))
+        end
+
+        local survivalFloor = 14
+        if hpPercent <= 30 then
+            survivalFloor = 28
+        elseif hpPercent <= 45 then
+            survivalFloor = 22
+        elseif recentlyDamaged or smartHealBursting then
+            survivalFloor = 18
+        end
+        if cps < survivalFloor then cps = survivalFloor end
+        return math.clamp(cps, survivalFloor, base)
+    end
+
+    local function getSmartHealDutyCycle(now)
+        now = now or os.clock()
+        if smartHealCycleStart <= 0 then smartHealCycleStart = now end
+        local period = SMARTHEAL_ACTIVE_SEC + SMARTHEAL_PAUSE_SEC
+        local elapsed = (now - smartHealCycleStart) % period
+        if elapsed < SMARTHEAL_ACTIVE_SEC then
+            return true, SMARTHEAL_ACTIVE_SEC - elapsed
+        end
+        return false, period - elapsed
+    end
+
+    local function toggleAutoHeal()
+        enabled = not enabled
+        lastHeal = 0
+        smartHealBursting = false
+        smartHealCycleStart = 0
+        healLastDamageTime = 0
+        healLastObservedHealth = nil
+        healNoGainStreak = 0
+        healAdaptiveDelay = 0
+        healPendingHealthCheck = nil
+        healPendingHealthAt = 0
+        healLagPauseUntil = 0
+        if enabled then
+            local humanoid = getHumanoid()
+            healLastObservedHealth = humanoid and humanoid.Health or nil
+            startHealPerfSampler()
+        else
+            stopHealPerfSampler()
+        end
+    end
+
+    local connection = UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if gameProcessed then return end
+        if input.UserInputType == Enum.UserInputType.Keyboard
+            and input.KeyCode == Enum.KeyCode.X then
+            toggleAutoHeal()
+        end
+    end)
+    local clickConnection = status.Activated:Connect(toggleAutoHeal)
+
+    runtime.__StandaloneAutoHeal = {
+        connection = connection,
+        clickConnection = clickConnection,
+        perfConnection = healPerfConnection,
+        gui = screenGui,
+    }
+
+    task.spawn(function()
+        while screenGui.Parent do
+            if not enabled then
+                show("SMARTHEAL OFF • PRESS X", false, false)
+                task.wait(0.12)
+            else
+                local now = os.clock()
+                local humanoid = getHumanoid()
+                if not humanoid then
+                    smartHealBursting = false
+                    smartHealCycleStart = 0
+                    show("WAITING FOR CHARACTER", true, false)
+                    task.wait(0.12)
+                elseif humanoid.Health <= 0 or humanoid.MaxHealth <= 0 then
+                    smartHealBursting = false
+                    smartHealCycleStart = 0
+                    healPendingHealthCheck = nil
+                    healPendingHealthAt = 0
+                    show("WAITING FOR RESPAWN", true, false)
+                    task.wait(0.12)
+                else
+                    local health = humanoid.Health
+                    local hpPercent = (health / humanoid.MaxHealth) * 100
+                    if healLastObservedHealth ~= nil then
+                        if health < healLastObservedHealth - 0.01 then
+                            healLastDamageTime = now
+                            healNoGainStreak = 0
+                            healAdaptiveDelay = math.max(0, healAdaptiveDelay * 0.45)
+                        elseif health > healLastObservedHealth + 0.75 then
+                            healNoGainStreak = 0
+                            healAdaptiveDelay = math.max(0, healAdaptiveDelay - 0.012)
+                        end
+                    end
+                    healLastObservedHealth = health
+                    local recentlyDamaged = (now - healLastDamageTime) < 1.25
+                    local hint = getHealthState()
+
+                    if hpPercent >= SMARTHEAL_RECOVER_PERCENT then
+                        smartHealBursting = false
+                        smartHealCycleStart = 0
+                        healPendingHealthCheck = nil
+                        healPendingHealthAt = 0
+                        healNoGainStreak = 0
+                        healAdaptiveDelay = 0
+                        show(hint, true, true)
+                        task.wait(0.08)
+                    elseif not smartHealBursting and hpPercent > SMARTHEAL_TRIGGER_PERCENT then
+                        show(("HP %.0f/%.0f • SMARTHEAL ARMED AT 65%%"):format(
+                            health, humanoid.MaxHealth
+                        ), true, false)
+                        task.wait(0.08)
+                    else
+                        if not smartHealBursting then
+                            smartHealBursting = true
+                            smartHealCycleStart = now
+                        end
+
+                        local waitForHealth = math.clamp(
+                            (healSmoothPingMs or 80) / 1000 * 1.15, 0.08, 0.35
+                        )
+                        if healPendingHealthCheck ~= nil
+                            and now - healPendingHealthAt >= waitForHealth then
+                            if health <= healPendingHealthCheck + 0.01 then
+                                if not recentlyDamaged then
+                                    healNoGainStreak = healNoGainStreak + 1
+                                    if healNoGainStreak >= 4 then
+                                        healAdaptiveDelay = math.min(0.12, healAdaptiveDelay + 0.008)
+                                    end
+                                end
+                            else
+                                healNoGainStreak = 0
+                                healAdaptiveDelay = math.max(0, healAdaptiveDelay - 0.02)
+                            end
+                            healPendingHealthCheck = nil
+                            healPendingHealthAt = 0
+                        end
+
+                        local critical = hpPercent <= 45
+                        if now < healLagPauseUntil and not critical and not recentlyDamaged then
+                            show(hint .. " • NETWORK PAUSE", true, false)
+                            task.wait(math.max(0.05, math.min(0.12, healLagPauseUntil - now)))
+                        else
+                            local cycleActive, phaseLeft = getSmartHealDutyCycle(now)
+                            if not cycleActive then
+                                healPendingHealthCheck = nil
+                                healPendingHealthAt = 0
+                                show(("SMARTHEAL PAUSE • HP %.0f%%"):format(hpPercent), true, false)
+                                task.wait(math.clamp(phaseLeft, 0.05, 0.25))
+                            else
+                                if healPendingHealthCheck == nil then
+                                    healPendingHealthCheck = health
+                                    healPendingHealthAt = now
+                                end
+                                local healCPS = getEffectiveHealCPS(hpPercent, recentlyDamaged)
+                                local healInterval = getHealInterval(healCPS, healAdaptiveDelay)
+                                local waitRemaining = healInterval - (now - lastHeal)
+                                if waitRemaining > 0 then
+                                    show(hint .. " • SMARTHEAL " .. math.floor(healCPS) .. " CPS", true, false)
+                                    task.wait(waitRemaining)
+                                else
+                                    local ok, result = sendOneFruit()
+                                    if ok then
+                                        lastHeal = os.clock()
+                                        show(hint .. " • SMARTHEAL " .. math.floor(healCPS) .. " CPS", true, true)
+                                        task.wait(healInterval)
+                                    else
+                                        show(result, true, false)
+                                        task.wait(0.08)
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end)
+end
